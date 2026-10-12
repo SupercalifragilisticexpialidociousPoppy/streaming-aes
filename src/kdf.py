@@ -1,30 +1,26 @@
-import pytest
-from nonce import build_nonce, CounterOverflowError
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-def test_build_nonce_normal():
-    """Ensure normal nonces are packed correctly."""
-    prefix = b'\x11\x22\x33\x44\x55\x66\x77'
+def derive_stream_key(master_key: bytes, salt: bytes, header_bytes: bytes) -> bytes:
+    """
+    Derives a unique 32-byte stream key using HKDF-SHA256.
     
-    # Test a normal chunk (counter 0, not final)
-    nonce = build_nonce(prefix, 0, is_final=False)
-    assert len(nonce) == 12
-    assert nonce == b'\x11\x22\x33\x44\x55\x66\x77\x00\x00\x00\x00\x00'
-    
-    # Test the final chunk (counter 5, final)
-    nonce_final = build_nonce(prefix, 5, is_final=True)
-    assert len(nonce_final) == 12
-    assert nonce_final == b'\x11\x22\x33\x44\x55\x66\x77\x00\x00\x00\x05\x01'
+    By passing the entire 49-byte serialized header into the `info` parameter, 
+    we cryptographically bind the stream key to the specific file metadata.
+    """
+    if len(salt) != 32:
+        raise ValueError(f"Invalid salt length: expected 32 bytes, got {len(salt)}")
+        
+    if len(header_bytes) != 49:
+        raise ValueError(f"Invalid header length: expected 49 bytes, got {len(header_bytes)}")
 
-def test_counter_overflow_guard():
-    """Ensure the system hard-crashes before a nonce can wrap back to 0."""
-    prefix = b'\x00' * 7
-    max_safe_counter = (1 << 32) - 1  # 4,294,967,295
+    # Initialize the HKDF-SHA256 derivation function
+    hkdf = HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,          # We want a 256-bit (32-byte) key for AES-256-GCM
+        salt=salt,          # 32 random bytes from the file's header
+        info=header_bytes   # The complete 49-byte header payload
+    )
     
-    # The maximum safe value should succeed
-    safe_nonce = build_nonce(prefix, max_safe_counter, False)
-    assert len(safe_nonce) == 12
-    
-    # The moment we hit 2^32, it must raise our specific error
-    unsafe_counter = 1 << 32
-    with pytest.raises(CounterOverflowError, match="Maximum chunk counter exceeded"):
-        build_nonce(prefix, unsafe_counter, False)
+    # Extract and expand the master key into the final stream key
+    return hkdf.derive(master_key)
