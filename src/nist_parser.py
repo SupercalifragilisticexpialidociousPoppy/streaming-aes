@@ -1,20 +1,28 @@
 """
 Runs NIST CAVS 14.0 GCM test vectors (.rsp files) against our own reference GCM.
 
-    python nist_parser.py < ../test/vectors/gcmDecrypt256.rsp
-    python nist_parser.py < ../test/vectors/gcmEncryptExtIV256.rsp
+    python nist_parser.py                       # all six files in test/nist_vectors
+    python nist_parser.py path/to/file.rsp ...  # specific files
 
 Every record is checked in both directions where the file allows it:
   - encrypt(Key, IV, PT, AAD) must give exactly (CT, Tag)
   - decrypt(Key, IV, CT, AAD, Tag) must give exactly PT
   - a record marked FAIL must be rejected by decrypt
 """
+import os
 import sys
+import time
 from typing import Iterable, Iterator
 
 from ref_gcm import reference_gcm_decrypt, reference_gcm_encrypt
 
 FIELDS = ("Count", "Key", "IV", "PT", "AAD", "CT", "Tag")
+
+VECTORS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "test", "nist_vectors")
+FILES = [
+    "gcmDecrypt128.rsp", "gcmDecrypt192.rsp", "gcmDecrypt256.rsp",
+    "gcmEncryptExtIV128.rsp", "gcmEncryptExtIV192.rsp", "gcmEncryptExtIV256.rsp",
+]
 
 
 def iter_vectors(lines: Iterable[str]) -> Iterator[dict]:
@@ -99,26 +107,28 @@ def check_vector(vec: dict) -> str | None:
     return None
 
 
+def run_file(path: str) -> int:
+    """Runs one .rsp file, prints a summary, returns the number of failures."""
+    passed = failed = 0
+    start = time.perf_counter()
+    with open(path, encoding="utf-8", errors="ignore") as f:
+        for vec in iter_vectors(f):
+            reason = check_vector(vec)
+            if reason is None:
+                passed += 1
+            else:
+                failed += 1
+                print(f"  Keylen={vec.get('Keylen')} Count={vec.get('Count')} failed: {reason}")
+    elapsed = time.perf_counter() - start
+    print(f"{os.path.basename(path):<26} {passed + failed:>6} run  {passed:>6} passed  "
+          f"{failed:>3} failed  {elapsed:6.2f} s")
+    return failed
+
+
 def main():
-    passed = 0
-    failed = 0
-    test_count = 0
-
-    for vec in iter_vectors(sys.stdin):
-        test_count += 1
-        reason = check_vector(vec)
-        if reason is None:
-            passed += 1
-        else:
-            failed += 1
-            print(f"Test {test_count} (Keylen={vec.get('Keylen')}, Count={vec.get('Count')}) failed: {reason}")
-
-    print("\n--- NIST CAVS 14.0 GCM Results ---")
-    print(f"Total Tests Executed : {test_count}")
-    print(f"Passed               : {passed}")
-    print(f"Failed               : {failed}")
-
-    sys.exit(1 if failed else 0)
+    paths = sys.argv[1:] or [os.path.join(VECTORS, name) for name in FILES]
+    failures = sum(run_file(p) for p in paths)
+    sys.exit(1 if failures else 0)
 
 
 if __name__ == "__main__":

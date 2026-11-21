@@ -1,20 +1,16 @@
 # streaming-aes
 
-Streaming AEAD over AES-256-GCM: encrypt files of any size in constant memory, using the
-STREAM construction (Hoang–Reyhanitabar–Rogaway–Vizár, CRYPTO 2015). Design: [docs/prd.md](docs/prd.md).
-Frozen wire format: [docs/SPEC.md](docs/SPEC.md). Threat model: [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
+Encrypt files of any size in constant memory with AES-256-GCM, safely. The file is split into
+1 MiB chunks, and each chunk is sealed so that it is tied to its file, its position, and whether
+it is the last one (the STREAM construction, Hoang–Reyhanitabar–Rogaway–Vizár, CRYPTO 2015).
 
-## Status
-
-| Week | Deliverable                                                     | State |
-|------|-----------------------------------------------------------------|-------|
-| W1   | Threat model + format sketch                                    | done  |
-| W2   | Own GF(2¹²⁸) GHASH (Shoup 4K table), reference GCM, NIST vectors | done — 47,250 / 47,250 vectors pass |
-| W3   | Header, HKDF, nonce frozen; single-chunk end-to-end round trip  | done  |
-| W4   | StreamEncryptor / StreamDecryptor, look-ahead loop, memory test | first version done (`stream.py`, `test_memory.py`) |
-
-Our GCM never uses ECB mode: the AES block cipher E_K and GCM's counter mode (GCTR) are
-built on the library's CTR mode (`aes_ctr.py`), matching NIST SP 800-38D's definitions.
+| What | Result |
+|---|---|
+| Our own GCM vs NIST's official test vectors | 47,250 / 47,250 pass |
+| Peak memory, encrypt or decrypt, 5 MiB or 50 MiB file | 3.02 MiB (one-shot GCM on 256 MiB: 512 MiB) |
+| Attacks on a naive "GCM in a loop" design | 5 / 5 succeed |
+| The same attacks on ours | 0 / 5 succeed |
+| Max file size | 4 PiB (one GCM call: 64 GiB) |
 
 ## Setup
 
@@ -24,36 +20,58 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-## Run
+## Use
 
 ```bash
-python -m pytest test -q                 # all tests (~6 s)
-cd src && python run_nist.py             # all 6 NIST files (47,250 vectors), per file, with timings
-cd src && python test.py                 # stream demo: encrypt + decrypt test_message.txt
-cd src && python -m pytest -s test_memory.py   # peak memory, 5 MB vs 50 MB file
-cd src && python demo_week3.py           # narrated single-chunk demo with 11 tamper attempts
+cd src
+python cli.py keygen key.hex
+python cli.py encrypt key.hex big_file.bin big_file.enc
+python cli.py decrypt key.hex big_file.enc big_file.out   # file appears only if fully verified
 ```
+
+## Demos and evidence
+
+```bash
+python -m pytest test -q          # all tests (from the repo root)
+cd src
+python nist_parser.py             # all 6 NIST files, with counts and timings
+python attacks.py                 # the 5 attacks: naive vs ours
+python socket_demo.py demo        # network transfer, intact and cut mid-stream
+python ../bench/bench.py          # throughput vs chunk size, memory, our GCM vs OpenSSL
+```
+
+## Documents
+
+| File | Contents |
+|---|---|
+| [docs/DESIGN_RATIONALE.md](docs/DESIGN_RATIONALE.md) | Why every component exists, and the simpler alternative we rejected |
+| [docs/SECURITY_ARGUMENT.md](docs/SECURITY_ARGUMENT.md) | What we claim, the bounds, and what we don't claim |
+| [docs/ATTACKS.md](docs/ATTACKS.md) | The five attacks, including recovering H after nonce reuse |
+| [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | Measurements and how the chunk size was chosen |
+| [docs/SPEC.md](docs/SPEC.md) | The frozen v1 file format |
+| [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) | Attacker model and hazard → defence map |
+| [docs/gcm_diagram.svg](docs/gcm_diagram.svg) | GCM encryption, drawn from SP 800-38D |
+| [docs/MIDSEM_FIXES.md](docs/MIDSEM_FIXES.md) | Corrections to the midsem slides and report |
+| [docs/prd.md](docs/prd.md) | Original requirements |
 
 ## Code map (`src/`)
 
-| File                    | What it does                                                            |
-|-------------------------|-------------------------------------------------------------------------|
-| `poly_multiplication.py`| GF(2¹²⁸) multiply (bitwise) and the 256-entry Shoup table for H          |
-| `ghash.py`              | H = AES_K(0¹²⁸), GHASH payload layout, Shoup multiply with reduction table |
-| `counter.py`            | J0 / counter blocks, 32-bit increment                                   |
-| `aes_ctr.py`            | E_K (AES on one block) and GCTR (GCM counter mode with inc32); no ECB    |
-| `tag_gen.py`            | Tag = GHASH ⊕ AES_K(J0), truncated to tag length                        |
-| `ref_gcm.py`            | Our full GCM encrypt / decrypt (verify-then-decrypt)                    |
-| `nist_parser.py`        | Runs NIST CAVS `.rsp` files against `ref_gcm`                           |
-| `header.py`             | 49-byte header: build, serialise, parse, validate                       |
-| `kdf.py`                | HKDF-SHA256 per-stream key                                              |
-| `nonce.py`              | prefix ‖ counter ‖ final-flag nonce, overflow guard                     |
-| `chunk_aead.py`         | Seal / open one chunk (OpenSSL or our own GCM)                          |
-| `single_chunk.py`       | Week-3 milestone: header + one final chunk, end to end                  |
-| `errors.py`             | `HeaderError`, `AuthenticationError`, `CounterOverflowError`            |
-| `stream.py`             | `StreamEncryptor` / `StreamDecryptor`: look-ahead loop, temp file + atomic rename |
-| `test_memory.py`        | tracemalloc peak-memory test (5 MB vs 50 MB)                            |
-| `run_nist.py`           | Runs all six NIST files through `nist_parser.py`                        |
-
-`test/nist_tester/` holds the older NIST runners. They skip records with an empty plaintext or AAD
-(36,428 of 47,250); use `src/run_nist.py` instead.
+| File | What it does |
+|---|---|
+| `aes_ctr.py` | E_K (AES on one block) and GCTR (GCM counter mode with inc32); no ECB |
+| `poly_multiplication.py` | GF(2¹²⁸) multiplication (bitwise) and Shoup's 4 KB table for H |
+| `ghash.py` | H = E_K(0¹²⁸), the GHASH input layout, fast multiply with the reduction table |
+| `counter.py` | J₀ (incl. non-96-bit IVs) and inc32 |
+| `tag_gen.py` | T = GHASH ⊕ E_K(J₀), truncated to the tag length |
+| `ref_gcm.py` | Our complete GCM: encrypt, and verify-then-decrypt |
+| `nist_parser.py` | Runs NIST CAVS `.rsp` files against our GCM |
+| `header.py` | The 49-byte header: build, serialise, parse, validate |
+| `kdf.py` | HKDF-SHA256 per-file key, bound to the whole header |
+| `nonce.py` | prefix ‖ counter ‖ final flag; refuses to wrap |
+| `chunk_aead.py` | Seal / open one chunk with OpenSSL or with our own GCM |
+| `stream.py` | `StreamEncryptor` / `StreamDecryptor`: look-ahead loop, temp file + atomic rename |
+| `errors.py` | `HeaderError`, `AuthenticationError`, `CounterOverflowError` |
+| `cli.py` | keygen / encrypt / decrypt |
+| `naive.py` | Deliberately broken baseline for the attacks |
+| `attacks.py` | The five attacks |
+| `socket_demo.py` | Encrypted transfer over TCP, with an optional mid-stream cut |

@@ -22,7 +22,7 @@ CHUNK i = ciphertext (chunk_size bytes, last one may be shorter, may be 0) || ta
 | 42     | nonce_prefix | 7 B  | `os.urandom(7)`, fresh per stream             |
 
 Parser rejects (`HeaderError`): length ≠ 49, wrong magic, version ≠ 1, alg_id ≠ 1,
-`chunk_size` outside [16 B, 16 MiB]. Default `chunk_size` = 1 MiB.
+`chunk_size` outside [16 B, 16 MiB]. Default `chunk_size` = 1 MiB (chosen from measurements; see BENCHMARKS.md). Files written with any allowed chunk size decrypt, because the size is in the header.
 
 The upper bound matters because the decryptor must allocate one chunk *before* it can
 authenticate anything; without it a tampered header could demand a 4 GiB buffer.

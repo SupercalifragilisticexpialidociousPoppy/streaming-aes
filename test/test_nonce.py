@@ -1,7 +1,7 @@
 import pytest
 
 from errors import CounterOverflowError
-from nonce import MAX_COUNTER, NONCE_SIZE, build_nonce, parse_nonce
+from nonce import MAX_COUNTER, NONCE_SIZE, build_nonce
 
 PREFIX = bytes.fromhex("a1a2a3a4a5a6a7")
 
@@ -11,12 +11,6 @@ def test_layout_prefix_counter_flag():
     assert len(n) == NONCE_SIZE == 12
     assert n == PREFIX + bytes.fromhex("01020304") + b"\x00"
     assert build_nonce(PREFIX, 0, is_final=True) == PREFIX + bytes(4) + b"\x01"
-
-
-def test_parse_is_inverse():
-    for counter in (0, 1, 255, 256, MAX_COUNTER):
-        for final in (False, True):
-            assert parse_nonce(build_nonce(PREFIX, counter, final)) == (PREFIX, counter, final)
 
 
 def test_nonces_never_repeat_within_a_stream():

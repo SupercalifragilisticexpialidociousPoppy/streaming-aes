@@ -16,8 +16,6 @@ import struct
 from errors import CounterOverflowError  # re-exported: `from nonce import CounterOverflowError` works
 from header import NONCE_PREFIX_SIZE
 
-__all__ = ["CounterOverflowError", "build_nonce", "parse_nonce", "NONCE_SIZE", "MAX_COUNTER"]
-
 NONCE_SIZE = 12
 MAX_COUNTER = (1 << 32) - 1   # 2^32 chunks x 1 MiB = 4 PiB per stream
 FLAG_NOT_FINAL = 0x00
@@ -36,10 +34,3 @@ def build_nonce(prefix: bytes, counter: int, is_final: bool) -> bytes:
     flag = FLAG_FINAL if is_final else FLAG_NOT_FINAL
     return prefix + struct.pack(">IB", counter, flag)
 
-
-def parse_nonce(nonce: bytes) -> tuple[bytes, int, bool]:
-    """Inverse of build_nonce -- for debugging and the demo."""
-    if len(nonce) != NONCE_SIZE:
-        raise ValueError("nonce must be 12 bytes")
-    counter, flag = struct.unpack(">IB", nonce[NONCE_PREFIX_SIZE:])
-    return nonce[:NONCE_PREFIX_SIZE], counter, flag == FLAG_FINAL

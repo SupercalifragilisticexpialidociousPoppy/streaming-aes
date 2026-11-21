@@ -5,7 +5,7 @@ Two interchangeable backends:
   "library"   -- the `cryptography` package (OpenSSL, hardware AES + carry-less multiply).
                  Fast; this is what the stream uses.
   "reference" -- our own GCM (ref_gcm.py) on our own GHASH. Slow, but it's ours, and it
-                 produces byte-identical output -- test/test_chunk_aead.py checks that.
+                 produces byte-identical output -- test_chunk_aead.py and test_stream.py check that.
 
 No associated data is used: the header is already bound in through the stream key (kdf.py).
 """

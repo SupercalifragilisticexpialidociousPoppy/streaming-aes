@@ -26,7 +26,7 @@ SALT_SIZE = 32
 NONCE_PREFIX_SIZE = 7
 HEADER_SIZE = 4 + 1 + 1 + 4 + SALT_SIZE + NONCE_PREFIX_SIZE  # = 49
 
-DEFAULT_CHUNK_SIZE = 1 << 20   # 1 MiB
+DEFAULT_CHUNK_SIZE = 1 << 20   # 1 MiB: chosen from measurements, see docs/BENCHMARKS.md
 MIN_CHUNK_SIZE = 16            # one AES block; tiny sizes are only useful in tests
 MAX_CHUNK_SIZE = 1 << 24       # 16 MiB; the decryptor buffers one chunk, so this caps its memory
 

@@ -1,0 +1,132 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 640" width="1120" height="640" font-family="Segoe UI, Arial, sans-serif" font-size="15">
+  <title>AES-GCM authenticated encryption (NIST SP 800-38D), drawn for a 96-bit IV, one AAD block and two plaintext blocks</title>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" fill="#33415c"/>
+    </marker>
+    <marker id="arrowH" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" fill="#b5532a"/>
+    </marker>
+  </defs>
+  <rect width="1120" height="640" fill="#ffffff"/>
+
+  <text x="30" y="32" font-size="19" font-weight="700" fill="#14213a">AES-GCM encryption (NIST SP 800-38D), 96-bit IV</text>
+  <text x="30" y="56" font-size="14" fill="#45525f">Top: counter mode (GCTR) gives secrecy.  Bottom: GHASH over A, C and the length block gives the tag.</text>
+
+  <g transform="translate(0,40)">
+    <!-- Row 1: counter blocks -->
+    <g fill="#eef2f6" stroke="#33415c" stroke-width="1.5">
+      <rect x="25" y="40" width="170" height="40" rx="6"/>
+      <rect x="255" y="40" width="170" height="40" rx="6"/>
+      <rect x="485" y="40" width="170" height="40" rx="6"/>
+    </g>
+    <g text-anchor="middle" fill="#14213a">
+      <text x="110" y="65">J₀ = IV ‖ 0³¹ ‖ 1</text>
+      <text x="340" y="65">J₁ = inc32(J₀)</text>
+      <text x="570" y="65">J₂ = inc32(J₁)</text>
+    </g>
+    <g stroke="#33415c" stroke-width="1.5" fill="none" marker-end="url(#arrow)">
+      <path d="M195 60H253"/>
+      <path d="M425 60H483"/>
+    </g>
+
+    <!-- Row 2: E_K (AES block cipher) -->
+    <g fill="#d9e4f2" stroke="#33415c" stroke-width="1.5">
+      <rect x="70" y="112" width="80" height="40" rx="6"/>
+      <rect x="300" y="112" width="80" height="40" rx="6"/>
+      <rect x="530" y="112" width="80" height="40" rx="6"/>
+    </g>
+    <g text-anchor="middle" font-weight="600" fill="#14213a">
+      <text x="110" y="137">E_K</text><text x="340" y="137">E_K</text><text x="570" y="137">E_K</text>
+    </g>
+    <g stroke="#33415c" stroke-width="1.5" fill="none" marker-end="url(#arrow)">
+      <path d="M110 80V110"/><path d="M340 80V110"/><path d="M570 80V110"/>
+      <path d="M340 152V178"/><path d="M570 152V178"/>
+    </g>
+
+    <!-- Row 3: XOR with plaintext -->
+    <g fill="#ffffff" stroke="#33415c" stroke-width="1.5">
+      <circle cx="340" cy="192" r="13"/><circle cx="570" cy="192" r="13"/>
+      <rect x="215" y="176" width="64" height="32" rx="6" fill="#f3f5f7"/>
+      <rect x="445" y="176" width="64" height="32" rx="6" fill="#f3f5f7"/>
+    </g>
+    <g stroke="#33415c" stroke-width="1.5">
+      <path d="M327 192H353M340 179V205"/><path d="M557 192H583M570 179V205"/>
+    </g>
+    <g text-anchor="middle" fill="#14213a"><text x="247" y="197">P₁</text><text x="477" y="197">P₂</text></g>
+    <g stroke="#33415c" stroke-width="1.5" fill="none" marker-end="url(#arrow)">
+      <path d="M279 192H325"/><path d="M509 192H555"/>
+      <path d="M340 205V232"/><path d="M570 205V232"/>
+    </g>
+
+    <!-- Row 4: ciphertext blocks and the length block -->
+    <g fill="#e6f3ef" stroke="#0f7563" stroke-width="1.5">
+      <rect x="300" y="234" width="80" height="34" rx="6"/>
+      <rect x="530" y="234" width="80" height="34" rx="6"/>
+    </g>
+    <rect x="710" y="234" width="180" height="34" rx="6" fill="#f3f5f7" stroke="#33415c" stroke-width="1.5"/>
+    <g text-anchor="middle" fill="#14213a">
+      <text x="340" y="256">C₁</text><text x="570" y="256">C₂</text>
+      <text x="800" y="256">len(A)₆₄ ‖ len(C)₆₄</text>
+    </g>
+    <g stroke="#33415c" stroke-width="1.5" fill="none" marker-end="url(#arrow)">
+      <path d="M340 268V325"/><path d="M570 268V325"/><path d="M800 268V325"/>
+    </g>
+
+    <!-- GHASH lane -->
+    <text x="30" y="312" font-size="13" font-weight="700" fill="#0f7563">GHASH: X₀ = 0,  Xᵢ = (Xᵢ₋₁ ⊕ Bᵢ) ⊗ H</text>
+    <rect x="65" y="322" width="90" height="34" rx="6" fill="#f3f5f7" stroke="#33415c" stroke-width="1.5"/>
+    <text x="110" y="344" text-anchor="middle" fill="#14213a">A (AAD)</text>
+
+    <g fill="#ffffff" stroke="#33415c" stroke-width="1.5">
+      <circle cx="340" cy="339" r="13"/><circle cx="570" cy="339" r="13"/><circle cx="800" cy="339" r="13"/>
+      <circle cx="985" cy="339" r="13"/>
+    </g>
+    <g stroke="#33415c" stroke-width="1.5">
+      <path d="M327 339H353M340 326V352"/><path d="M557 339H583M570 326V352"/>
+      <path d="M787 339H813M800 326V352"/><path d="M972 339H998M985 326V352"/>
+    </g>
+    <!-- multiply-by-H nodes -->
+    <g fill="#fbede5" stroke="#b5532a" stroke-width="1.8">
+      <circle cx="225" cy="339" r="17"/><circle cx="455" cy="339" r="17"/>
+      <circle cx="685" cy="339" r="17"/><circle cx="895" cy="339" r="17"/>
+    </g>
+    <g text-anchor="middle" font-weight="700" fill="#b5532a" font-size="14">
+      <text x="225" y="344">⊗H</text><text x="455" y="344">⊗H</text>
+      <text x="685" y="344">⊗H</text><text x="895" y="344">⊗H</text>
+    </g>
+    <g stroke="#33415c" stroke-width="1.5" fill="none" marker-end="url(#arrow)">
+      <path d="M155 339H206"/><path d="M242 339H325"/><path d="M353 339H436"/>
+      <path d="M472 339H555"/><path d="M583 339H666"/><path d="M702 339H785"/>
+      <path d="M813 339H876"/><path d="M912 339H970"/><path d="M998 339H1018"/>
+    </g>
+    <g fill="#14213a" font-size="12" text-anchor="middle">
+      <text x="283" y="330">X₁</text><text x="513" y="330">X₂</text><text x="743" y="330">X₃</text><text x="940" y="330">X₄</text>
+    </g>
+    <rect x="1020" y="320" width="80" height="38" rx="6" fill="#0f7563" stroke="#0f7563"/>
+    <text x="1060" y="344" text-anchor="middle" font-weight="700" fill="#ffffff">Tag T</text>
+
+    <!-- H: where it comes from, feeding every multiply -->
+    <rect x="60" y="430" width="250" height="40" rx="6" fill="#fbede5" stroke="#b5532a" stroke-width="1.8"/>
+    <text x="185" y="455" text-anchor="middle" font-weight="700" fill="#b5532a">H = E_K(0¹²⁸)  (hash subkey)</text>
+    <g stroke="#b5532a" stroke-width="1.5" fill="none" stroke-dasharray="5 4">
+      <path d="M185 430V402H895"/>
+    </g>
+    <g stroke="#b5532a" stroke-width="1.5" fill="none" stroke-dasharray="5 4" marker-end="url(#arrowH)">
+      <path d="M225 402V358"/><path d="M455 402V358"/><path d="M685 402V358"/><path d="M895 402V358"/>
+    </g>
+
+    <!-- tag mask E_K(J0) -->
+    <g stroke="#33415c" stroke-width="1.5" fill="none">
+      <path d="M70 132H35V500H985V356" marker-end="url(#arrow)"/>
+    </g>
+    <text x="520" y="494" text-anchor="middle" font-size="13" fill="#45525f">E_K(J₀) masks the GHASH output: T = X₄ ⊕ E_K(J₀)</text>
+
+    <!-- legend -->
+    <g font-size="13" fill="#45525f">
+      <text x="30" y="540">⊕ = XOR.   ⊗H = multiply by H in GF(2¹²⁸): carry-less multiplication, then reduce mod x¹²⁸ + x⁷ + x² + x + 1</text>
+      <text x="30" y="562">(the same H at every step; our code does it with Shoup's 4 KB table). E_K = the AES block cipher applied to one 16-byte block.</text>
+      <text x="30" y="584">J₀ is used only for the tag; data uses J₁, J₂, … (inc32 increments the last 32 bits). A and C are zero-padded to whole blocks.</text>
+    </g>
+  </g>
+</svg>

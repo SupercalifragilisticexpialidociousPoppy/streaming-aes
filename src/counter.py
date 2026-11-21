@@ -1,38 +1,34 @@
 import struct
+
 from ghash import run_ghash_loop
 
-# counter.py — only this line changes inside init_counters
-def init_counters(iv: bytes, h: bytes = None, ghash_func = run_ghash_loop) -> tuple[bytes, bytes]:
+
+def init_counters(iv: bytes, shoup_table: list[int]) -> tuple[bytes, bytes]:
+    """
+    Builds J0 (the pre-counter block, used only to mask the tag) and J1 = inc32(J0)
+    (the first counter block used for data), per SP 800-38D section 7.1.
+
+    96-bit IV (the fast path, and what our stream always uses): J0 = IV || 0^31 || 1.
+    Any other length: J0 = GHASH_H(IV || zero padding || 64 zero bits || [len(IV) in bits]_64).
+    """
     if len(iv) == 12:
-        y0 = iv + struct.pack('>I', 1)
+        j0 = iv + struct.pack('>I', 1)
     else:
-        if h is None or ghash_func is None:
-            raise ValueError("Non-96-bit IVs require the Hash Subkey (H) and GHASH function.")
-
         pad_len = (16 - (len(iv) % 16)) % 16
-        padded_iv = iv + (b'\x00' * pad_len)
+        len_block = struct.pack('>QQ', 0, len(iv) * 8)
+        j0 = run_ghash_loop(iv + b'\x00' * pad_len + len_block, shoup_table)
 
-        iv_bits = len(iv) * 8
-        len_block = struct.pack('>QQ', 0, iv_bits)
-
-        # payload first, table second — matches run_ghash_loop's real signature
-        y0 = ghash_func(padded_iv + len_block, h)
-
-    y1 = increment_counter(y0)
-    return y0, y1
+    return j0, increment_counter(j0)
 
 
 def increment_counter(counter_block: bytes) -> bytes:
     """
-    Increments the 32-bit big-endian integer in the rightmost 4 bytes
-    of a 16-byte counter block while keeping the 12-byte prefix intact.
+    inc32: increments the 32-bit big-endian integer in the rightmost 4 bytes
+    of a 16-byte counter block (mod 2^32) while keeping the 12-byte prefix intact.
     """
     if len(counter_block) != 16:
         raise ValueError("Counter block must be exactly 16 bytes.")
-    
+
     prefix = counter_block[:12]
     ctr_val = struct.unpack('>I', counter_block[12:])[0]
-    
-    next_ctr_val = (ctr_val + 1) % (1 << 32)
-    
-    return prefix + struct.pack('>I', next_ctr_val)
+    return prefix + struct.pack('>I', (ctr_val + 1) % (1 << 32))
