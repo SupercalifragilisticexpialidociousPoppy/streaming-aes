@@ -1,6 +1,26 @@
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 import struct
 
+from poly_multiplication import R
+
+
+def _build_reduction_table() -> list[int]:
+    """
+    Shoup's second, H-independent table. Shifting z right by 8 bits (multiplying by x^8)
+    drops its low byte off the end; each dropped bit folds back in as a multiple of R.
+    What gets folded back depends only on that dropped byte, so we precompute all 256 cases.
+    """
+    table = []
+    for dropped in range(256):
+        z = dropped
+        for _ in range(8):
+            z = (z >> 1) ^ R if z & 1 else z >> 1
+        table.append(z)
+    return table
+
+
+REDUCTION_TABLE = _build_reduction_table()
+
 def derive_hash_key(master_key: bytes) -> int:
     # 1. Create a 16-byte (128-bit) block of pure zeros
     zero_block = b'\x00' * 16
@@ -45,24 +65,20 @@ def shoup_multiply(state: int, table: list[int]) -> int:
     Processes the state byte-by-byte from right to left (Horner's Method).
     """
     z = 0
-    R = 0xe1000000000000000000000000000000
-    
+
     # Process from the lowest byte (LSB) up to the highest byte (MSB)
     for i in range(16):
         # Extract the i-th byte from the right
         byte_val = (state >> (8 * i)) & 0xFF
-        
+
         # Look up the precomputed multiplication and XOR it into z
         z ^= table[byte_val]
-        
-        # For all but the final byte, shift z right by 8 bits (in the Galois field)
+
+        # For all but the final byte, shift z right by 8 bits (multiply by x^8 in the field):
+        # a plain shift, plus the reduction table's fix-up for the byte that fell off.
         if i < 15:
-            for _ in range(8):
-                if z & 1:
-                    z = (z >> 1) ^ R
-                else:
-                    z >>= 1
-                    
+            z = (z >> 8) ^ REDUCTION_TABLE[z & 0xFF]
+
     return z
 
 def run_ghash_loop(payload: bytes, shoup_table: list[int]) -> bytes:
