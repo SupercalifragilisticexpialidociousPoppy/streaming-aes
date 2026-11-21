@@ -44,6 +44,8 @@ python ../bench/bench.py          # throughput vs chunk size, memory, our GCM vs
 
 | File | Contents |
 |---|---|
+| [docs/STUDY_GUIDE.md](docs/STUDY_GUIDE.md) | Everything explained from zero: every component, every slide, every number, viva questions |
+| [docs/report/final_report.pdf](docs/report/final_report.pdf) | Final report (LaTeX source alongside) |
 | [docs/DESIGN_RATIONALE.md](docs/DESIGN_RATIONALE.md) | Why every component exists, and the simpler alternative we rejected |
 | [docs/SECURITY_ARGUMENT.md](docs/SECURITY_ARGUMENT.md) | What we claim, the bounds, and what we don't claim |
 | [docs/ATTACKS.md](docs/ATTACKS.md) | The five attacks, including recovering H after nonce reuse |

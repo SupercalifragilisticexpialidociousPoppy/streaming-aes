@@ -74,7 +74,7 @@
     </g>
 
     <!-- GHASH lane -->
-    <text x="30" y="312" font-size="13" font-weight="700" fill="#0f7563">GHASH: X₀ = 0,  Xᵢ = (Xᵢ₋₁ ⊕ Bᵢ) ⊗ H</text>
+    <text x="50" y="306" font-size="12" font-weight="700" fill="#0f7563">GHASH: X₀ = 0, Xᵢ = (Xᵢ₋₁ ⊕ Bᵢ) ⊗ H</text>
     <rect x="65" y="322" width="90" height="34" rx="6" fill="#f3f5f7" stroke="#33415c" stroke-width="1.5"/>
     <text x="110" y="344" text-anchor="middle" fill="#14213a">A (AAD)</text>
 
