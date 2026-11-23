@@ -1,34 +1,36 @@
+"""
+The 96-bit per-chunk nonce:
+
+    | nonce_prefix (7 B) | counter (4 B, big-endian) | final flag (1 B) |
+
+- prefix: fixed for the whole stream (from the header)
+- counter: chunk index 0, 1, 2, ... -- binds each chunk to its position (stops reordering/replay)
+- flag: 0x00 for every chunk except the last, 0x01 for the last (stops truncation)
+
+Within one stream the counter never repeats, so a nonce can never repeat: the collision
+probability is exactly zero, not merely small. 96 bits is GCM's fast path -- any other
+IV length costs an extra GHASH pass to turn it into a counter block.
+"""
 import struct
 
-class CounterOverflowError(Exception):
-    """Raised when the chunk counter exceeds the 32-bit maximum."""
-    pass
+from errors import CounterOverflowError  # re-exported: `from nonce import CounterOverflowError` works
+from header import NONCE_PREFIX_SIZE
 
-def build_nonce(nonce_prefix: bytes, counter: int, is_final: bool) -> bytes:
-    """
-    Constructs a deterministic 96-bit (12-byte) nonce for AES-GCM.
-    
-    Layout:
-    [ 7 bytes: nonce_prefix ] [ 4 bytes: counter (big-endian) ] [ 1 byte: flag ]
-    """
-    if len(nonce_prefix) != 7:
-        raise ValueError(f"Invalid nonce prefix length: expected 7 bytes, got {len(nonce_prefix)}")
-        
+NONCE_SIZE = 12
+MAX_COUNTER = (1 << 32) - 1   # 2^32 chunks x 1 MiB = 4 PiB per stream
+FLAG_NOT_FINAL = 0x00
+FLAG_FINAL = 0x01
+
+
+def build_nonce(prefix: bytes, counter: int, is_final: bool) -> bytes:
+    if len(prefix) != NONCE_PREFIX_SIZE:
+        raise ValueError("nonce prefix must be 7 bytes")
     if counter < 0:
-        raise ValueError("Counter cannot be negative.")
-        
-    # STRICT GUARD: A 4-byte unsigned integer maxes out at 4,294,967,295 (2^32 - 1).
-    # If we hit 2^32, the counter would mathematically wrap back to 0.
-    # Wrapping back to 0 would instantly trigger a fatal nonce-reuse attack.
-    if counter >= (1 << 32):
-        raise CounterOverflowError("Maximum chunk counter exceeded. Cannot encrypt further.")
-        
-    # The flag is 0x01 if this is the final chunk, and 0x00 otherwise
-    flag = 0x01 if is_final else 0x00
-    
-    # Pack the components:
-    # >  : Big-endian
-    # 7s : 7-byte string
-    # I  : 4-byte unsigned integer
-    # B  : 1-byte unsigned char
-    return struct.pack('>7s I B', nonce_prefix, counter, flag)
+        raise ValueError("counter must be non-negative")
+    if counter > MAX_COUNTER:
+        # Never wrap: a wrapped counter is a repeated nonce, and a repeated GCM nonce
+        # leaks the XOR of two plaintexts and lets an attacker solve for H.
+        raise CounterOverflowError("stream exceeds 2^32 chunks")
+    flag = FLAG_FINAL if is_final else FLAG_NOT_FINAL
+    return prefix + struct.pack(">IB", counter, flag)
+

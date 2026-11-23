@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 750" width="1180" height="750" font-family="Segoe UI, Arial, sans-serif" font-size="15">
+  <title>How the streaming engine encrypts and decrypts: look-ahead by one chunk, verify each tag before writing, rename the output into place only at the end</title>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" fill="#33415c"/>
+    </marker>
+  </defs>
+  <rect width="1180" height="750" fill="#ffffff"/>
+  <text x="290" y="38" text-anchor="middle" font-size="19" font-weight="700" fill="#14213a">Encrypt</text>
+  <text x="790" y="38" text-anchor="middle" font-size="19" font-weight="700" fill="#14213a">Decrypt</text>
+
+  <!-- Encrypt column -->
+  <g fill="#f3f5f7" stroke="#33415c" stroke-width="1.5">
+    <rect x="100" y="60" width="380" height="44" rx="6"/>
+    <rect x="100" y="132" width="380" height="44" rx="6"/>
+    <rect x="100" y="204" width="380" height="44" rx="6"/>
+    <rect x="100" y="276" width="380" height="44" rx="6" fill="#d9e4f2"/>
+    <rect x="100" y="348" width="380" height="44" rx="6"/>
+    <polygon points="290,420 380,460 290,500 200,460" fill="#ffffff"/>
+    <rect x="160" y="540" width="260" height="44" rx="6" fill="#e6f3ef" stroke="#0f7563"/>
+  </g>
+  <g text-anchor="middle" fill="#14213a">
+    <text x="290" y="87">Make header (fresh salt + prefix), write it</text>
+    <text x="290" y="159">K = HKDF-SHA256(master, salt, header)</text>
+    <text x="290" y="231">Read chunk i, then peek at chunk i+1</text>
+    <text x="290" y="303" font-size="14">nonce = prefix ‖ i ‖ (1 if chunk i+1 is empty, else 0)</text>
+    <text x="290" y="375">Write AES-GCM(K, nonce, chunk i) = ct ‖ tag</text>
+    <text x="290" y="465" font-weight="600">Last chunk?</text>
+    <text x="290" y="567">Done</text>
+  </g>
+  <g stroke="#33415c" stroke-width="1.5" fill="none" marker-end="url(#a)">
+    <path d="M290 104V130"/><path d="M290 176V202"/><path d="M290 248V274"/>
+    <path d="M290 320V346"/><path d="M290 392V418"/><path d="M290 500V538"/>
+    <path d="M200 460H70V226H98"/>
+  </g>
+  <text x="300" y="525" font-size="13" fill="#45525f">yes</text>
+  <text x="80" y="452" font-size="13" fill="#45525f">no: i = i + 1</text>
+
+  <!-- Decrypt column -->
+  <g fill="#f3f5f7" stroke="#33415c" stroke-width="1.5">
+    <rect x="600" y="60" width="380" height="44" rx="6"/>
+    <rect x="600" y="132" width="380" height="44" rx="6"/>
+    <rect x="600" y="204" width="380" height="44" rx="6"/>
+    <rect x="600" y="276" width="380" height="44" rx="6" fill="#d9e4f2"/>
+    <polygon points="790,345 880,385 790,425 700,385" fill="#ffffff"/>
+    <rect x="950" y="358" width="215" height="54" rx="6" fill="#fbede5" stroke="#b5532a"/>
+    <rect x="600" y="455" width="380" height="44" rx="6"/>
+    <polygon points="790,525 880,565 790,605 700,565" fill="#ffffff"/>
+    <rect x="600" y="645" width="380" height="44" rx="6" fill="#e6f3ef" stroke="#0f7563"/>
+  </g>
+  <g text-anchor="middle" fill="#14213a">
+    <text x="790" y="87">Read the 49-byte header and check it</text>
+    <text x="790" y="159">K = HKDF-SHA256(master, salt, header)</text>
+    <text x="790" y="231">Read chunk i, then peek at chunk i+1</text>
+    <text x="790" y="303" font-size="14">nonce = prefix ‖ i ‖ (1 if nothing follows, else 0)</text>
+    <text x="790" y="390" font-weight="600">Tag OK?</text>
+    <text x="1057" y="380" font-size="14">Delete temp file.</text>
+    <text x="1057" y="400" font-size="14">Reject: nothing released.</text>
+    <text x="790" y="482">Write plaintext i to a temp file</text>
+    <text x="790" y="570" font-weight="600">Last chunk?</text>
+    <text x="790" y="672">Rename temp file → output (atomic)</text>
+  </g>
+  <text x="990" y="87" font-size="13" fill="#b5532a">bad header → reject</text>
+  <g stroke="#33415c" stroke-width="1.5" fill="none" marker-end="url(#a)">
+    <path d="M790 104V130"/><path d="M790 176V202"/><path d="M790 248V274"/>
+    <path d="M790 320V343"/><path d="M880 385H948"/><path d="M790 425V453"/>
+    <path d="M790 499V523"/><path d="M790 605V643"/>
+    <path d="M700 565H570V226H598"/>
+  </g>
+  <text x="905" y="377" font-size="13" fill="#45525f">no</text>
+  <text x="800" y="443" font-size="13" fill="#45525f">yes</text>
+  <text x="800" y="628" font-size="13" fill="#45525f">yes</text>
+  <text x="580" y="557" font-size="13" fill="#45525f">no: i = i + 1</text>
+
+  <g font-size="13" fill="#45525f">
+    <text x="40" y="722">Look-ahead: chunk i can only get the final flag once we know chunk i+1 is empty, so at most two chunks are in memory.</text>
+    <text x="40" y="742">The output file appears only after the last chunk verifies, so a cut-off or tampered file never shows up as a real file.</text>
+  </g>
+</svg>

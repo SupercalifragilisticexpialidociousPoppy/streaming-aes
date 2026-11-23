@@ -1,0 +1,367 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=2.3cm]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{amsmath,amssymb}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\usepackage{url}
+
+\definecolor{navy}{HTML}{14213A}
+\definecolor{teal}{HTML}{0F7563}
+\graphicspath{{../png/}}
+\setlist{itemsep=2pt,topsep=4pt}
+\newcommand{\cat}{\,\|\,}
+\newcommand{\GF}{\mathrm{GF}(2^{128})}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small Streaming AEAD over AES-GCM}
+\fancyhead[R]{\small Final Report $\mid$ Group 4}
+\fancyfoot[C]{\thepage}
+
+\begin{document}
+
+\begin{titlepage}
+\centering
+\vspace*{2.5cm}
+{\large\scshape Cryptography Group Project\par}
+\vspace{1.2cm}
+{\Huge\bfseries\color{navy} Streaming AEAD over AES-GCM\par}
+\vspace{0.4cm}
+{\Large Encrypting Files of Any Size in Constant Memory\par}
+\vspace{1cm}
+\rule{0.7\textwidth}{0.4pt}\par
+\vspace{1cm}
+{\Large\bfseries Final Project Report\par}
+\vspace{2cm}
+{\large\bfseries Group 4\par}
+\vspace{0.4cm}
+\begin{tabular}{ll}
+Haider Abuzer Salik & 2024A7PS0691G\\
+Aadi Kawalay & 2024A7PS0504G\\
+Bhagyesh Kamal & 2024ADPS0863G\\
+Mohammad Zaid Agha & 2024ADPS0840G
+\end{tabular}
+\vfill
+Project repository:\\
+\url{https://github.com/SupercalifragilisticexpialidociousPoppy/streaming-aes}
+\end{titlepage}
+
+\begin{abstract}
+AES-GCM authenticates a message as one unit, so a safe one-shot decryptor must hold the whole message in memory, and NIST limits a single GCM message to $2^{39}-256$ bits (about 64\,GiB). We built a chunked file format over AES-256-GCM that encrypts files of any size in constant memory without weakening GCM's security bounds. Each 1\,MiB chunk is a separate GCM call whose nonce encodes the chunk's position and whether it is the last chunk, under a key derived for each file with HKDF-SHA256 (the STREAM construction of Hoang, Reyhanitabar, Rogaway and Viz\'ar). We also implemented GCM itself, including $\GF$ arithmetic and Shoup's table method, and validated it against all 47,250 NIST test vectors. The streaming engine uses 3.02\,MiB of memory for both encryption and decryption, independent of file size (one-shot GCM needed 512\,MiB for a 256\,MiB file). Five attacks (truncation, reordering, replay, cross-file splicing and nonce reuse with recovery of GCM's hash key) succeed against a naive chunked design and all fail against ours. For a 50\,GiB file the confidentiality bound stays at $2^{-65.7}$ and the total forgery bound at $2^{-96.4}$, the same as one-shot GCM.
+\end{abstract}
+
+\setcounter{tocdepth}{1}
+\tableofcontents
+\newpage
+
+%=====================================================================
+\section{Introduction}
+
+\subsection{Motivation}
+Authenticated encryption protects data from being read and from being changed. AES-GCM is the most widely used authenticated encryption mode: counter mode provides secrecy and a polynomial hash over $\GF$ provides an authentication tag~\cite{mv-spec,sp80038d}. It is designed for one message at a time, which causes two problems for large files.
+
+\paragraph{Memory.} A decryptor must not release plaintext before the tag verifies (\emph{verify-then-release}), and the tag covers the whole message. The simple safe implementation therefore buffers the entire file. We measured 512\,MiB of memory to encrypt a 256\,MiB file with a one-shot API (the whole input plus the whole output). Python's \texttt{AESGCM} refuses inputs over $2^{31}-1$ bytes altogether.
+
+\paragraph{A hard limit.} GCM numbers its 16-byte blocks with a 32-bit counter. One value is reserved for the tag and the counter may not wrap, so a message has at most $2^{32}-2$ blocks:
+\[
+(2^{32}-2)\times 128 \text{ bits} = 2^{39}-256 \text{ bits} \approx 64 \text{ GiB}.
+\]
+
+Splitting the file into chunks solves both, but naive chunking is unsafe: every chunk still passes its own tag check while an attacker drops, reorders, repeats or swaps chunks, and a careless nonce scheme can repeat a (key, nonce) pair, which breaks GCM completely~\cite{joux}.
+
+\subsection{Objectives}
+\begin{enumerate}
+\item Implement GCM from its definition, including $\GF$ multiplication and GHASH, and validate it against NIST's test vectors.
+\item Design a chunked file format whose security bounds match one-shot GCM.
+\item Build a streaming engine with constant memory and all-or-nothing output.
+\item Demonstrate the attacks a naive design allows, and show ours resists them.
+\item Measure memory and throughput, and choose parameters from the measurements.
+\end{enumerate}
+
+\subsection{Changes since the mid-semester review}
+Three issues were raised at the mid-semester review: the use of AES-ECB, the need for HKDF, and the GCM diagram. All are addressed (Section~\ref{sec:feedback}). We also integrated our GCM into the streaming engine, fixed a test runner that skipped 10,822 NIST vectors, and measured decryption memory.
+
+%=====================================================================
+\section{Background}
+
+\subsection{AES}
+AES~\cite{fips197} is a block cipher: with a key $K$ it maps a 16-byte block to a 16-byte block, and without $K$ the output looks random. We write $E_K(X)$ for AES applied to one block $X$. We use AES-256 from the \texttt{cryptography} library (OpenSSL); implementing AES was out of scope.
+
+\subsection{GCM}
+For a 96-bit IV, the pre-counter block is $J_0 = IV \cat 0^{31} \cat 1$, and counter blocks are $J_i = \mathrm{inc}_{32}(J_{i-1})$, where $\mathrm{inc}_{32}$ adds one to the last 32 bits modulo $2^{32}$. Encryption is counter mode (GCTR):
+\[
+C_i = P_i \oplus E_K(J_i), \qquad i \ge 1.
+\]
+The hash subkey is $H = E_K(0^{128})$. GHASH processes the blocks $B_1,\dots,B_m$ of
+\[ A \cat 0^v \cat C \cat 0^u \cat [\mathrm{len}(A)]_{64} \cat [\mathrm{len}(C)]_{64}, \]
+where $A$ is the associated data and the zero padding fills whole blocks:
+\[
+X_0 = 0,\quad X_i = (X_{i-1} \oplus B_i)\cdot H, \qquad \mathrm{GHASH}_H = X_m = \bigoplus_{i=1}^{m} B_i \cdot H^{m-i+1}.
+\]
+The tag is $T = \mathrm{GHASH}_H \oplus E_K(J_0)$. Figure~\ref{fig:gcm} shows the whole construction. The mask $E_K(J_0)$ matters: without it the tag would be a public polynomial in $H$ and $H$ could be solved for.
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=\textwidth]{gcm_diagram.png}
+\caption{AES-GCM encryption, drawn by us from NIST SP 800-38D. $H = E_K(0^{128})$ feeds every multiplication; $\otimes H$ is multiplication in $\GF$.}
+\label{fig:gcm}
+\end{figure}
+
+\subsection{The field $\GF$}
+A 128-bit block is a polynomial of degree below 128 with coefficients in $\{0,1\}$. Addition is XOR. Multiplication is polynomial multiplication followed by reduction modulo $x^{128}+x^7+x^2+x+1$, which is irreducible, so every non-zero element has an inverse. GCM uses reflected bit order: the leftmost bit is the coefficient of $x^0$, so the element $1$ is \texttt{0x80 00 \dots 00} and multiplication by $x$ is a right shift.
+
+Forging a tag for a changed message requires $H$ to be a root of the difference of two GHASH polynomials. A non-zero polynomial of degree $\ell$ has at most $\ell$ roots, so a single forgery attempt on an $\ell$-block message succeeds with probability about $\ell/2^{128}$~\cite{mv-sec}.
+
+\subsection{HKDF}
+HKDF~\cite{rfc5869} derives keys from a secret using HMAC-SHA256. For a 32-byte output it computes
+\[
+\text{extract: } \mathrm{PRK} = \mathrm{HMAC}(\mathit{salt}, \mathit{IKM}), \qquad \text{expand: } \mathrm{OKM} = \mathrm{HMAC}(\mathrm{PRK},\ \mathit{info} \cat \texttt{0x01}).
+\] Different salts or \emph{info} strings give unrelated keys.
+
+\subsection{STREAM}
+Hoang, Reyhanitabar, Rogaway and Viz\'ar~\cite{hrrv} define STREAM: a message is split into segments, and segment $i$ is encrypted with a nonce that encodes $i$ and a flag marking the last segment. Its security reduces to that of the underlying nonce-based AEAD. Google Tink's streaming AEAD~\cite{tink} and the \texttt{age} file format~\cite{age} use this construction; the TLS~1.3 record layer~\cite{rfc8446} uses a similar per-record sequence number.
+
+%=====================================================================
+\section{Threat model}
+The attacker can read and rewrite everything on the wire or on disk: flip bits, drop, reorder, duplicate or substitute chunks, and edit the header. A storage provider that keeps our files and chooses what to return is included. Out of scope: compromised endpoints, side channels on the network, denial of service, and key management.
+
+\begin{center}
+\begin{tabularx}{\textwidth}{lX}
+\toprule
+Goal & Meaning\\
+\midrule
+Confidentiality & The plaintext stays secret.\\
+Chunk integrity & No chunk can be modified undetected.\\
+Stream integrity & Chunks are in order, none is missing, none comes from another file.\\
+All-or-nothing output & The user never sees a partly verified file as complete.\\
+\bottomrule
+\end{tabularx}
+\end{center}
+A loop of independent GCM calls gives the first two goals only.
+
+%=====================================================================
+\section{Design}
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=\textwidth]{stream_format.png}
+\caption{The file format: the 49-byte header, the per-file key, the chunks, and each chunk's nonce.}
+\label{fig:format}
+\end{figure}
+
+\subsection{Header}
+Every file begins with a 49-byte header, sent in the clear (Figure~\ref{fig:format}). Nothing in it is secret.
+
+\begin{center}
+\begin{tabularx}{\textwidth}{llX}
+\toprule
+Field & Size & Purpose\\
+\midrule
+Magic \texttt{"CHNK"} & 4\,B & Reject files that are not ours immediately, with a clear error.\\
+Version & 1\,B & Allows the format to change without misreading old files.\\
+Algorithm ID & 1\,B & Names the cipher, so a later version can add one (e.g.\ ChaCha20-Poly1305).\\
+Chunk size & 4\,B & The decryptor must know where chunks end before checking anything. Capped at 16\,MiB so a forged header cannot force a huge read.\\
+Salt & 32\,B & Random per file; makes the file key unique.\\
+Nonce prefix & 7\,B & Random per file; the first 7 bytes of every nonce.\\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{A key per file, and why HKDF is necessary}\label{sec:hkdf}
+\[
+K_{\mathrm{file}} = \mathrm{HKDF\text{-}SHA256}(\mathit{IKM} = K_{\mathrm{master}},\ \mathit{salt} = \text{header salt},\ \mathit{info} = \text{all 49 header bytes},\ L = 32).
+\]
+Without a per-file key, every file would be encrypted directly under the master key, with four consequences:
+\begin{enumerate}
+\item \textbf{Nonce reuse across files.} A file's nonces are its random 7-byte prefix plus a counter. Two files with the same prefix reuse every (key, nonce) pair. The chance that some two of $n$ files share a prefix is about $n^2/2^{57}$: roughly 1 in 130,000 for a million files and about 7\% for 100 million. With per-file keys a clash needs two equal 32-byte salts, about $n^2/2^{257}$.
+\item \textbf{Splicing.} A chunk from one file would decrypt correctly inside another.
+\item \textbf{Unprotected header.} With the header as \emph{info}, any edit changes the key and every chunk fails.
+\item \textbf{Shared security budget.} GCM's bounds degrade with the total data under one key; a key per file gives each file the full budget.
+\end{enumerate}
+We considered three alternatives. Using the master key with the header as associated data fixes only point 3. Random 96-bit nonces per chunk can still collide ($q^2/2^{97}$, accumulating across files) and still need a counter and final flag for stream integrity. Encrypting a random file key under the master key (envelope encryption) is also correct, but stores a wrapped key in every file and adds a second encryption step; HKDF achieves the same from a public salt.
+
+\subsection{Nonce}
+Chunk $i$ uses the 96-bit nonce
+\[
+N_i = \mathit{prefix}_{7\,\mathrm{B}} \cat \mathrm{BE}_{32}(i) \cat f_i, \qquad f_i = \begin{cases}1 & \text{last chunk}\\ 0 & \text{otherwise.}\end{cases}
+\]
+The counter binds each chunk to its position, which defeats reordering and replay, and makes nonces within a file unique by construction; encryption fails rather than wrap at $2^{32}$ chunks. The final flag defeats truncation and appending. The nonce is never stored: the receiver rebuilds it from the chunk's position, so a moved chunk cannot be repaired by editing a nonce. 96 bits is GCM's fast path ($J_0 = N \cat 0^{31} \cat 1$); other lengths require hashing the IV, and the original GCM proof was flawed for them~\cite{iom}. With a per-file key the random prefix is not strictly required; it costs 7 bytes, matches Tink's layout, and is kept as defence in depth.
+
+\subsection{Streaming engine}
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=\textwidth]{stream_flow.png}
+\caption{Encryption and decryption. Look-ahead by one chunk decides the final flag; plaintext goes to a temporary file that is renamed into place only after the last chunk verifies.}
+\label{fig:flow}
+\end{figure}
+
+A chunk can only be sealed with the final flag once the engine knows nothing follows it, so it reads chunk $i+1$ before sealing chunk $i$ (Figure~\ref{fig:flow}); at most two chunks are in memory. An empty file still produces one empty final chunk, so deleting every chunk is detected. The encryptor generates its salt and prefix itself, accepts none from the caller, and refuses to run twice, so a retry can never repeat a nonce. Reads loop until a chunk is full, because sockets and pipes can return short reads.
+
+The decryptor verifies each chunk's tag before writing its plaintext. Truncation can only be detected at the end, so plaintext goes to a uniquely named temporary file, which is renamed into place with \texttt{os.replace} (atomic) after the final chunk verifies and deleted on any failure.
+
+\subsection{Chunk size}
+The default chunk size is 1\,MiB. Section~\ref{sec:bench} shows that every size from 16\,KiB upwards is faster than a typical SSD; 64\,KiB is fastest but limits a file to $2^{32}\times 64$\,KiB $=256$\,TiB, below our requirement of 1\,PiB; 256\,KiB was unstable across runs; 1\,MiB is stable, has 0.0016\% overhead and allows 4\,PiB. Because the chunk size is in the header, files with any permitted size decrypt.
+
+%=====================================================================
+\section{Implementation}
+
+\subsection{Structure}
+\begin{center}
+\begin{tabularx}{\textwidth}{lX}
+\toprule
+Module & Role\\
+\midrule
+\texttt{aes\_ctr.py} & $E_K$ and GCTR built on the library's CTR mode; no ECB\\
+\texttt{poly\_multiplication.py} & Bitwise $\GF$ multiplication; Shoup's 4\,KB table\\
+\texttt{ghash.py}, \texttt{counter.py}, \texttt{tag\_gen.py} & $H$, GHASH, $J_0$ and $\mathrm{inc}_{32}$, the tag\\
+\texttt{ref\_gcm.py} & Our complete GCM, verify-then-decrypt\\
+\texttt{header.py}, \texttt{kdf.py}, \texttt{nonce.py} & The format\\
+\texttt{chunk\_aead.py}, \texttt{stream.py} & Sealing one chunk (OpenSSL or ours); the streaming engine\\
+\texttt{naive.py}, \texttt{attacks.py} & The deliberately broken baseline and the five attacks\\
+\texttt{cli.py}, \texttt{socket\_demo.py} & Command-line tool; encrypted transfer over TCP\\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{GCM without ECB}
+SP 800-38D defines GCM in terms of the block cipher $E_K$ and GCTR only. The library exposes AES only through a mode, so we build both on its CTR mode: CTR started at block $X$ and applied to 16 zero bytes outputs $E_K(X)$. The library's CTR increments all 128 bits whereas $\mathrm{inc}_{32}$ wraps only the last 32, so GCTR restarts the library's CTR at the 32-bit boundary; a test checks this across the wrap, and another fails if ECB mode appears anywhere in the source.
+
+\subsection{Shoup's table}
+Bitwise multiplication by $H$ takes 128 steps per block. Since $H$ is fixed per message, we precompute $H$ times every byte value (256 entries of 16 bytes, 4\,KB)~\cite{shoup}. A multiplication is then 16 lookups and 15 one-byte shifts, with a second 256-entry table folding back the bits shifted off. The table itself is built with 8 multiplications rather than 256, because multiplication distributes over XOR. GHASH became 6.3$\times$ faster; the bitwise method remains as the reference the table is tested against.
+
+\subsection{Two backends}
+\texttt{chunk\_aead.py} seals a chunk either with OpenSSL (default) or with our GCM. Files produced by either decrypt with the other, byte for byte.
+
+%=====================================================================
+\section{Evaluation}
+All measurements: AMD Ryzen 7 7745HX, 15\,GB RAM, Windows 11, Python 3.12, \texttt{cryptography} 50.
+
+\subsection{NIST conformance}
+Our GCM passes all 47,250 records of NIST's CAVS 14.0 GCM files~\cite{cavp} (encryption and decryption, 128-, 192- and 256-bit keys, tags of 32 to 128 bits, IVs of several lengths), in about one second per file. Each record is checked in both directions where possible, and records marked FAIL must be rejected. The mid-semester figure of 36,428 came from a parser that ignored lines with empty values, skipping every record with an empty plaintext or associated data. Corrupting a single entry of the reduction table makes 1,368 vectors in one file fail, which shows the tests detect errors.
+
+\subsection{Test suite}
+94 automated tests cover field laws, the NIST vectors, agreement with OpenSSL on random inputs, header parsing, HKDF's RFC~5869 test vector, the nonce layout and counter overflow, round trips at every boundary size (0, 1, chunk$\pm$1 bytes, multi-chunk), every tamper case, short reads, and all-or-nothing output.
+
+\subsection{Attacks}
+\texttt{naive.py} encrypts each chunk of each file under the master key with a random 12-byte nonce stored beside it, and no final flag.
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+Attack & Naive & Ours\\
+\midrule
+Truncation (drop the last chunk) & accepted & rejected\\
+Reordering (swap chunks 0 and 1) & accepted & rejected\\
+Replay (repeat chunk 1) & accepted & rejected\\
+Splicing (chunk from another file) & accepted & rejected\\
+Nonce reuse $\rightarrow$ recover $H$ $\rightarrow$ forge & accepted & rejected\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Recovering $H$.} For two one-block messages under the same key and nonce with no associated data, $T_j = C_j H^2 \oplus L H \oplus E_K(J_0)$. Adding the two tags cancels the common terms:
+\[
+T_1 \oplus T_2 = (C_1 \oplus C_2)\,H^2 \quad\Longrightarrow\quad H = \left(\frac{T_1\oplus T_2}{C_1\oplus C_2}\right)^{2^{127}},
+\]
+since squaring is a bijection on $\GF$. Then $E_K(J_0) = T_1 \oplus \mathrm{GHASH}_H(C_1)$, and knowledge of $P_1$ gives the keystream, so the attacker can produce a valid ciphertext and tag for any message. The script recovers the true $H$ and the naive decryptor accepts a forged ``PAY EVE 99999.99''. Against our design we force two files to share a nonce prefix; their keys differ, the algebra yields an unrelated value, and the forgery is rejected.
+
+\subsection{Memory}
+Peak memory measured with \texttt{tracemalloc} is 3.02\,MiB for both encryption and decryption, identical for 5\,MiB and 50\,MiB files: the current chunk, the look-ahead chunk and the output. A one-shot encryption of a 256\,MiB file needed 512\,MiB. (The mid-semester figure of 4.02\,MiB fell after removing a copy per chunk.)
+
+\subsection{Throughput and chunk size}\label{sec:bench}
+\begin{center}
+\begin{tabular}{lrrrr}
+\toprule
+Chunk size & Median MiB/s & Range MiB/s & Overhead & Max file\\
+\midrule
+4 KiB & 1,506 & 1,472--1,531 & 0.39\% & 16 TiB\\
+16 KiB & 3,807 & 3,587--3,872 & 0.098\% & 64 TiB\\
+64 KiB & 6,468 & 6,133--6,625 & 0.024\% & 256 TiB\\
+256 KiB & 7,966 & 7,474--8,104$^{*}$ & 0.006\% & 1 PiB\\
+\textbf{1 MiB} & \textbf{2,498} & \textbf{2,441--2,538} & \textbf{0.0016\%} & \textbf{4 PiB}\\
+4 MiB & 3,037 & 2,962--3,071 & 0.0004\% & 16 PiB\\
+16 MiB & 3,043 & 2,883--3,145 & 0.0001\% & 64 PiB\\
+\bottomrule
+\end{tabular}
+\end{center}
+{\small $^{*}$In a separate run 256\,KiB measured 2,170--5,170\,MiB/s; it sits at the edge of the CPU cache.}
+
+\subsection{Our GCM against OpenSSL}
+Sealing a 1\,MiB chunk takes 0.23\,ms with OpenSSL (about 4.4\,GiB/s) and 162\,ms with our Python GCM (6.2\,MiB/s), a factor of about 700. OpenSSL uses AES-NI for AES and the PCLMULQDQ carry-less multiplication instruction for GHASH; our implementation exists to demonstrate and cross-check GCM, not for production use.
+
+%=====================================================================
+\section{Security analysis}
+We assume AES-256 behaves as a pseudorandom permutation, HKDF-SHA256 as a pseudorandom function, a uniformly random 32-byte master key, and a working random number generator.
+
+\paragraph{No nonce is reused.} Within a file nonces differ in their counter, with probability one. Across files keys differ unless salts collide, which happens with probability at most $n^2/2^{257}$.
+
+\paragraph{Each chunk is as secure as a GCM message.} McGrew and Viega's Theorem~1~\cite{mv-sec} bounds the confidentiality advantage by $\mathrm{Adv}_{\mathrm{AES}} + (\sigma + 2q)^2/2^{129}$ plus smaller terms, where $\sigma$ is the number of plaintext blocks and $q$ the number of GCM calls under the key. For a 50\,GiB file, $\sigma \approx 2^{31.64}$.
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+& One-shot GCM & Ours, 1\,MiB chunks\\
+\midrule
+Confidentiality bound & $2^{-65.7}$ & $2^{-65.7}$\\
+Forgery per attempt & $2^{-96.4}$ & $2^{-112}$\\
+Forgery, one attempt per chunk & --- & $2^{-96.4}$\\
+Nonce collision & 0 & 0\\
+Largest file & 64 GiB & 4 PiB\\
+\bottomrule
+\end{tabular}
+\end{center}
+With $q = 51{,}200$ chunks, $\sigma + 2q$ grows by 0.003\%, so confidentiality is unchanged. Each chunk is $2^{15.6}$ times harder to forge, and one attempt at each of the 51,200 chunks totals $2^{-96.4}$, as for the whole message. The quadratic term also appears in Theorem~2's forgery bound and is the same for both designs. Iwata, Ohashi and Minematsu found and repaired a flaw in the original proof for non-96-bit nonces~\cite{iom}; we use 96-bit nonces only.
+
+\paragraph{The stream cannot be rearranged.} Truncation, appending, reordering, replay, splicing and header edits all require a chunk to verify under a (key, nonce) pair it was not sealed with, which is a GCM forgery; this is the STREAM argument~\cite{hrrv}.
+
+\paragraph{Not claimed.} Rollback of a whole file to an older genuine version; a random number generator that repeats (for example after a virtual machine snapshot is restored twice); side-channel resistance of our Python GCM; length hiding beyond one chunk; key management. The 4\,PiB limit is a capacity, not a guarantee: at $2^{48}$ blocks Theorem~1 gives about $2^{-33}$.
+
+%=====================================================================
+\section{Response to mid-semester feedback}\label{sec:feedback}
+\begin{center}
+\begin{tabularx}{\textwidth}{lX}
+\toprule
+Issue & Resolution\\
+\midrule
+Use of AES-ECB & Removed. AES is used only as $E_K$ and GCTR, built on CTR mode; all 47,250 vectors still pass, and a test rejects any reintroduction.\\
+Why HKDF is needed & Section~\ref{sec:hkdf}: per-file keys prevent cross-file nonce reuse, splicing and header tampering, with the probabilities given.\\
+Incorrect GCM diagram & Replaced by our own drawing from SP 800-38D (Figure~\ref{fig:gcm}), which shows $H = E_K(0^{128})$, the $\GF$ multiplication and the block order.\\
+GCM not integrated & Our GCM is a backend of the engine with byte-identical output.\\
+36,428 NIST tests & 47,250; the old parser skipped records with empty fields.\\
+Memory of decryption & Measured: 3.02\,MiB, equal to encryption.\\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+%=====================================================================
+\section{Limitations and future work}
+Our GCM is about 700 times slower than OpenSSL and not constant-time, so it is not used for real data. The design does not detect rollback of a whole file and depends on the system's random number generator. Natural extensions are password-based keys (Argon2 before HKDF), a second algorithm identifier for ChaCha20-Poly1305 on processors without AES instructions, random access to individual chunks (possible because nonces depend only on position), and version counters to detect rollback.
+
+\section{Conclusion}
+We implemented AES-GCM from its definition and validated it against all 47,250 NIST vectors, then built a chunked format over it that encrypts files of any size in about 3\,MiB of memory. Per-file keys from HKDF and nonces that encode position and finality defeat truncation, reordering, replay, splicing and nonce reuse, each of which we demonstrated against a naive design, while the security bounds remain those of one-shot GCM.
+
+\paragraph{Use of AI assistance.} As stated at the mid-semester review, we used an LLM to help write code and documentation. Every result in this report is reproduced by the repository's tests and scripts (\texttt{pytest}, \texttt{nist\_parser.py}, \texttt{attacks.py}, \texttt{bench/bench.py}).
+
+\begin{thebibliography}{99}
+\bibitem{mv-spec} D.~A.~McGrew and J.~Viega, \emph{The Galois/Counter Mode of Operation (GCM)}, submission to NIST, 2005.
+\bibitem{mv-sec} D.~A.~McGrew and J.~Viega, \emph{The Security and Performance of the Galois/Counter Mode (GCM) of Operation}, INDOCRYPT 2004; IACR ePrint 2004/193.
+\bibitem{sp80038d} M.~Dworkin, \emph{Recommendation for Block Cipher Modes of Operation: Galois/Counter Mode (GCM) and GMAC}, NIST SP 800-38D, 2007.
+\bibitem{fips197} NIST, \emph{Advanced Encryption Standard (AES)}, FIPS 197, 2001.
+\bibitem{cavp} NIST Cryptographic Algorithm Validation Program, \emph{GCM Validation System (GCMVS) test vectors}, CAVS 14.0.
+\bibitem{rfc5869} H.~Krawczyk and P.~Eronen, \emph{HMAC-based Extract-and-Expand Key Derivation Function (HKDF)}, RFC 5869, 2010.
+\bibitem{hrrv} V.~T.~Hoang, R.~Reyhanitabar, P.~Rogaway and D.~Viz\'ar, \emph{Online Authenticated-Encryption and its Nonce-Reuse Misuse-Resistance}, CRYPTO 2015.
+\bibitem{iom} T.~Iwata, K.~Ohashi and K.~Minematsu, \emph{Breaking and Repairing GCM Security Proofs}, CRYPTO 2012.
+\bibitem{joux} A.~Joux, \emph{Authentication Failures in NIST Version of GCM}, comment to NIST, 2006.
+\bibitem{shoup} V.~Shoup, \emph{On Fast and Provably Secure Message Authentication Based on Universal Hashing}, CRYPTO 1996.
+\bibitem{tink} Google, \emph{Tink: Streaming AEAD (AES-GCM-HKDF)}, \url{https://developers.google.com/tink}.
+\bibitem{age} F.~Valsorda and B.~Cartwright-Cox, \emph{The age file encryption format}, \url{https://c2sp.org/age}.
+\bibitem{rfc8446} E.~Rescorla, \emph{The Transport Layer Security (TLS) Protocol Version 1.3}, RFC 8446, 2018.
+\end{thebibliography}
+
+\end{document}

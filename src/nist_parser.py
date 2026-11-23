@@ -1,103 +1,135 @@
+"""
+Runs NIST CAVS 14.0 GCM test vectors (.rsp files) against our own reference GCM.
+
+    python nist_parser.py                       # all six files in test/nist_vectors
+    python nist_parser.py path/to/file.rsp ...  # specific files
+
+Every record is checked in both directions where the file allows it:
+  - encrypt(Key, IV, PT, AAD) must give exactly (CT, Tag)
+  - decrypt(Key, IV, CT, AAD, Tag) must give exactly PT
+  - a record marked FAIL must be rejected by decrypt
+"""
+import os
 import sys
-from ref_gcm import reference_gcm_decrypt
+import time
+from typing import Iterable, Iterator
 
-# Replace this import with your actual GCM implementation
-# from my_gcm import custom_gcm_decrypt
+from ref_gcm import reference_gcm_decrypt, reference_gcm_encrypt
 
-def mock_custom_gcm_decrypt(key: bytes, iv: bytes, ct: bytes, aad: bytes, tag: bytes) -> tuple[bool, bytes]:
+FIELDS = ("Count", "Key", "IV", "PT", "AAD", "CT", "Tag")
+
+VECTORS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "test", "nist_vectors")
+FILES = [
+    "gcmDecrypt128.rsp", "gcmDecrypt192.rsp", "gcmDecrypt256.rsp",
+    "gcmEncryptExtIV128.rsp", "gcmEncryptExtIV192.rsp", "gcmEncryptExtIV256.rsp",
+]
+
+
+def iter_vectors(lines: Iterable[str]) -> Iterator[dict]:
     """
-    Placeholder for your actual GCM decryption function.
-    Must return a tuple of (is_valid_tag: bool, plaintext: bytes).
+    Yields one dict per test record, with the active [Keylen/IVlen/...] config merged in.
+
+    A record ends at a blank line, a new "Count =" line, a new "[...]" config line, or EOF.
+    Lines like "PT = " (empty value) are kept as empty fields -- they're real vectors
+    (empty plaintext / empty AAD), and dropping them silently skips ~10% of the suite.
     """
-    # For testing the parser, we'll just pretend everything fails
-    try:
-        plaintext = reference_gcm_decrypt(key, iv, ct, tag, aad)
-        # If no ValueError is raised, decryption succeeded
-        return True, plaintext
-    except ValueError:
-        # If the tag is invalid, return authentication failure status
-        return False, b""
+    config = {}
+    record = {}
 
+    def flush():
+        if "Key" in record:
+            yield {**config, **record}
+        record.clear()
 
-def main():
-    current_test = {}
-    config = {}  # Store global [Keylen = 128] etc.
-    passed = 0
-    failed = 0
-    test_count = 0
+    for raw in lines:
+        line = raw.strip()
 
-    for line in sys.stdin:
-        line = line.strip()
-        
-        if not line or line.startswith("#"):
+        if line.startswith("#"):
             continue
 
-        # Parse global configuration brackets
+        if not line:
+            yield from flush()
+            continue
+
         if line.startswith("[") and line.endswith("]"):
+            yield from flush()
             inner = line[1:-1]
             if "=" in inner:
-                k, v = inner.split("=")
+                k, v = inner.split("=", 1)
                 config[k.strip()] = int(v.strip())
             continue
 
         if line == "FAIL":
-            current_test["FAIL"] = True
-        else:
-            key_value = line.split(" = ")
-            if len(key_value) == 2:
-                k, v = key_value[0].strip(), key_value[1].strip()
-                current_test[k] = v
+            record["FAIL"] = True
+            continue
 
-        if "PT" in current_test or "FAIL" in current_test:
-            test_count += 1
-            
-            # Convert defined bit lengths to byte lengths
-            pt_len_bytes = config.get("PTlen", 0) // 8
-            aad_len_bytes = config.get("AADlen", 0) // 8
-            
-            key = bytes.fromhex(current_test.get("Key", ""))
-            iv = bytes.fromhex(current_test.get("IV", ""))
-            
-            # Truncate CT and AAD to their exact required lengths
-            ct = bytes.fromhex(current_test.get("CT", ""))[:pt_len_bytes]
-            aad = bytes.fromhex(current_test.get("AAD", ""))[:aad_len_bytes]
-            
-            expected_tag = bytes.fromhex(current_test.get("Tag", ""))
-            
-            # The config dict now holds IVlen, Keylen, Taglen, etc. 
-            # if your decryption function needs explicit lengths.
-            
-            is_valid, decrypted_pt = mock_custom_gcm_decrypt(key, iv, ct, aad, expected_tag)
-            
-            if "FAIL" in current_test:
-                if not is_valid:
-                    passed += 1
-                else:
-                    print(f"Test {test_count} Failed: Accepted invalid tag.")
-                    failed += 1
+        if "=" in line:
+            k, v = line.split("=", 1)
+            k = k.strip()
+            if k == "Count":
+                yield from flush()
+            if k in FIELDS:
+                record[k] = v.strip()
+
+    yield from flush()
+
+
+def check_vector(vec: dict) -> str | None:
+    """Returns None if the vector passes, otherwise a short reason it failed."""
+    key = bytes.fromhex(vec["Key"])
+    iv = bytes.fromhex(vec["IV"])
+    aad = bytes.fromhex(vec.get("AAD", ""))
+    ct = bytes.fromhex(vec.get("CT", ""))
+    tag = bytes.fromhex(vec["Tag"])
+
+    if vec.get("FAIL"):
+        try:
+            reference_gcm_decrypt(key, iv, ct, tag, aad)
+        except ValueError:
+            return None
+        return "accepted an invalid tag"
+
+    pt = bytes.fromhex(vec.get("PT", ""))
+
+    got_ct, got_tag = reference_gcm_encrypt(key, iv, pt, aad, tag_len=len(tag))
+    if got_ct != ct:
+        return "encrypt: ciphertext mismatch"
+    if got_tag != tag:
+        return "encrypt: tag mismatch"
+
+    try:
+        got_pt = reference_gcm_decrypt(key, iv, ct, tag, aad)
+    except ValueError:
+        return "decrypt: rejected a valid tag"
+    if got_pt != pt:
+        return "decrypt: plaintext mismatch"
+
+    return None
+
+
+def run_file(path: str) -> int:
+    """Runs one .rsp file, prints a summary, returns the number of failures."""
+    passed = failed = 0
+    start = time.perf_counter()
+    with open(path, encoding="utf-8", errors="ignore") as f:
+        for vec in iter_vectors(f):
+            reason = check_vector(vec)
+            if reason is None:
+                passed += 1
             else:
-                # Also ensure the expected plaintext is truncated if necessary
-                expected_pt = bytes.fromhex(current_test.get("PT", ""))[:pt_len_bytes]
-                
-                if is_valid and decrypted_pt == expected_pt:
-                    passed += 1
-                elif not is_valid:
-                    print(f"Test {test_count} Failed: Rejected valid tag.")
-                    failed += 1
-                else:
-                    print(f"Test {test_count} Failed: Plaintext mismatch.")
-                    failed += 1
+                failed += 1
+                print(f"  Keylen={vec.get('Keylen')} Count={vec.get('Count')} failed: {reason}")
+    elapsed = time.perf_counter() - start
+    print(f"{os.path.basename(path):<26} {passed + failed:>6} run  {passed:>6} passed  "
+          f"{failed:>3} failed  {elapsed:6.2f} s")
+    return failed
 
-            current_test.clear()
 
-    print("\n--- NIST CAVS 14.0 GCM Decryption Results ---")
-    print(f"Total Tests Executed : {test_count}")
-    print(f"Passed               : {passed}")
-    print(f"Failed               : {failed}")
-    
-    if failed > 0:
-        sys.exit(1)
-    sys.exit(0)
+def main():
+    paths = sys.argv[1:] or [os.path.join(VECTORS, name) for name in FILES]
+    failures = sum(run_file(p) for p in paths)
+    sys.exit(1 if failures else 0)
+
 
 if __name__ == "__main__":
     main()

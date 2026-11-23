@@ -1,95 +1,97 @@
+"""
+The 49-byte stream header (format v1, frozen -- see docs/SPEC.md).
+
+    offset  field         size  value
+    0       magic          4 B  b"CHNK"
+    4       version        1 B  0x01
+    5       alg_id         1 B  0x01 = AES-256-GCM, key from HKDF-SHA256
+    6       chunk_size     4 B  big-endian, plaintext bytes per chunk
+    10      salt          32 B  random per stream, feeds HKDF
+    42      nonce_prefix   7 B  random per stream, first 7 bytes of every nonce
+
+The header travels in the clear. It is authenticated *implicitly*: all 49 bytes are the
+HKDF `info`, so changing any byte changes the stream key and every chunk then fails.
+"""
 import os
 import struct
 from dataclasses import dataclass
 
-@dataclass
+from errors import HeaderError
+
+MAGIC = b"CHNK"
+VERSION = 0x01
+ALG_AES256_GCM_HKDF_SHA256 = 0x01
+
+SALT_SIZE = 32
+NONCE_PREFIX_SIZE = 7
+HEADER_SIZE = 4 + 1 + 1 + 4 + SALT_SIZE + NONCE_PREFIX_SIZE  # = 49
+
+DEFAULT_CHUNK_SIZE = 1 << 20   # 1 MiB: chosen from measurements, see docs/BENCHMARKS.md
+MIN_CHUNK_SIZE = 16            # one AES block; tiny sizes are only useful in tests
+MAX_CHUNK_SIZE = 1 << 24       # 16 MiB; the decryptor buffers one chunk, so this caps its memory
+
+_FIXED = struct.Struct(">4sBBI")  # magic, version, alg_id, chunk_size = first 10 bytes
+
+
+@dataclass(frozen=True)
 class Header:
-    """
-    Represents the 49-byte plaintext header for the streaming AEAD format.
-    """
-    magic: bytes = b'CHNK'
-    version: int = 0x01
-    alg_id: int = 0x01
-    chunk_size: int = 1048576  # Default to 1 MiB
-    salt: bytes = b''
-    nonce_prefix: bytes = b''
+    chunk_size: int
+    salt: bytes
+    nonce_prefix: bytes
+    version: int = VERSION
+    alg_id: int = ALG_AES256_GCM_HKDF_SHA256
 
     @classmethod
-    def generate(cls, chunk_size: int = 1048576) -> 'Header':
+    def new(cls, chunk_size: int = DEFAULT_CHUNK_SIZE) -> "Header":
         """
-        Factory method to generate a fresh header for a new encryption stream.
-        Pulls cryptographically secure randomness from the OS.
+        A fresh header for a new stream. Salt and prefix come from the OS CSPRNG, right
+        now, at the moment of use -- never at import time and never from the caller.
         """
-        return cls(
-            chunk_size=chunk_size,
-            salt=os.urandom(32),
-            nonce_prefix=os.urandom(7)
-        )
-
-    def serialise(self) -> bytes:
-        """
-        Packs the header fields into a strict 49-byte big-endian binary string.
-        Format mapping:
-          >  : Big-endian (network byte order)
-          4s : 4-byte string (magic)
-          B  : 1-byte unsigned char (version)
-          B  : 1-byte unsigned char (alg_id)
-          I  : 4-byte unsigned integer (chunk_size)
-          32s: 32-byte string (salt)
-          7s : 7-byte string (nonce_prefix)
-        """
-        return struct.pack(
-            '>4s B B I 32s 7s',
-            self.magic,
-            self.version,
-            self.alg_id,
-            self.chunk_size,
-            self.salt,
-            self.nonce_prefix
-        )
-
-    @classmethod
-    def parse(cls, data: bytes) -> 'Header':
-        """
-        Unpacks a 49-byte sequence into a Header object and immediately validates it.
-        """
-        if len(data) != 49:
-            raise ValueError(f"Invalid header length: expected 49 bytes, got {len(data)}")
-        
-        # Unpack exactly as serialised
-        unpacked = struct.unpack('>4s B B I 32s 7s', data)
-        
-        header = cls(
-            magic=unpacked[0],
-            version=unpacked[1],
-            alg_id=unpacked[2],
-            chunk_size=unpacked[3],
-            salt=unpacked[4],
-            nonce_prefix=unpacked[5]
-        )
-        
+        header = cls(chunk_size=chunk_size,
+                     salt=os.urandom(SALT_SIZE),
+                     nonce_prefix=os.urandom(NONCE_PREFIX_SIZE))
         header.validate()
         return header
 
-    def validate(self):
+    # stream.py calls it generate(); same thing.
+    generate = new
+
+    def validate(self) -> None:
+        if self.version != VERSION:
+            raise HeaderError(f"unsupported version {self.version}")
+        if self.alg_id != ALG_AES256_GCM_HKDF_SHA256:
+            raise HeaderError(f"unsupported alg_id {self.alg_id}")
+        if not MIN_CHUNK_SIZE <= self.chunk_size <= MAX_CHUNK_SIZE:
+            raise HeaderError(f"chunk_size {self.chunk_size} outside "
+                              f"[{MIN_CHUNK_SIZE}, {MAX_CHUNK_SIZE}]")
+        if len(self.salt) != SALT_SIZE:
+            raise HeaderError("salt must be 32 bytes")
+        if len(self.nonce_prefix) != NONCE_PREFIX_SIZE:
+            raise HeaderError("nonce_prefix must be 7 bytes")
+
+    def serialise(self) -> bytes:
+        self.validate()
+        return (_FIXED.pack(MAGIC, self.version, self.alg_id, self.chunk_size)
+                + self.salt + self.nonce_prefix)
+
+    @classmethod
+    def parse(cls, data: bytes) -> "Header":
         """
-        Enforces the format specification. Rejects unsupported configurations.
+        Parses and validates exactly HEADER_SIZE bytes. Runs before any key is derived,
+        so a garbage header is rejected up front instead of making us allocate a huge
+        chunk buffer or try an algorithm we don't support.
         """
-        if self.magic != b'CHNK':
-            raise ValueError(f"Invalid magic bytes: expected b'CHNK', got {self.magic}")
-            
-        if self.version != 0x01:
-            raise ValueError(f"Unsupported version: {self.version}")
-            
-        if self.alg_id != 0x01:
-            raise ValueError(f"Unsupported algorithm ID: {self.alg_id}. Expected 0x01 (AES-256-GCM-HKDF).")
-            
-        # Reject absurd chunk sizes (e.g., smaller than 1 KiB or larger than 1 GiB)
-        if not (1024 <= self.chunk_size <= (1024 * 1024 * 1024)):
-            raise ValueError(f"Absurd chunk size: {self.chunk_size} bytes.")
-            
-        if len(self.salt) != 32:
-            raise ValueError(f"Invalid salt length: expected 32 bytes, got {len(self.salt)}")
-            
-        if len(self.nonce_prefix) != 7:
-            raise ValueError(f"Invalid nonce prefix length: expected 7 bytes, got {len(self.nonce_prefix)}")
+        if len(data) != HEADER_SIZE:
+            raise HeaderError(f"header must be {HEADER_SIZE} bytes, got {len(data)}")
+
+        magic, version, alg_id, chunk_size = _FIXED.unpack_from(data, 0)
+        if magic != MAGIC:
+            raise HeaderError("bad magic: not a chunkcrypt stream")
+
+        header = cls(chunk_size=chunk_size,
+                     salt=data[10:10 + SALT_SIZE],
+                     nonce_prefix=data[10 + SALT_SIZE:HEADER_SIZE],
+                     version=version,
+                     alg_id=alg_id)
+        header.validate()
+        return header

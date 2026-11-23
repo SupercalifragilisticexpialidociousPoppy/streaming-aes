@@ -1,19 +1,32 @@
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 import struct
 
-def derive_hash_key(master_key: bytes) -> int:
-    # 1. Create a 16-byte (128-bit) block of pure zeros
-    zero_block = b'\x00' * 16
-    
-    # 2. Set up AES using your master key. 
-    # (ECB mode is used here to encrypt a single raw block without needing an IV)
-    cipher = Cipher(algorithms.AES(master_key), modes.ECB())
-    encryptor = cipher.encryptor()
-    
-    # 3. Encrypt the zero block to get H as bytes
-    h_bytes = encryptor.update(zero_block) + encryptor.finalize()
-    
-    # 4. Convert those bytes into a standard Python integer for your math functions
+from aes_ctr import aes_block
+from poly_multiplication import R
+
+
+def _build_reduction_table() -> list[int]:
+    """
+    Shoup's second, H-independent table. Shifting z right by 8 bits (multiplying by x^8)
+    drops its low byte off the end; each dropped bit folds back in as a multiple of R.
+    What gets folded back depends only on that dropped byte, so we precompute all 256 cases.
+    """
+    table = []
+    for dropped in range(256):
+        z = dropped
+        for _ in range(8):
+            z = (z >> 1) ^ R if z & 1 else z >> 1
+        table.append(z)
+    return table
+
+
+REDUCTION_TABLE = _build_reduction_table()
+
+def derive_hash_key(key: bytes) -> int:
+    """
+    The GHASH subkey H = E_K(0^128): the AES block cipher applied once to the all-zero block,
+    returned as an integer for the GF(2^128) maths.
+    """
+    h_bytes = aes_block(key, b'\x00' * 16)
     return int.from_bytes(h_bytes, byteorder='big')
 
 def build_ghash_payload(aad: bytes, ciphertext: bytes) -> bytes:
@@ -45,24 +58,20 @@ def shoup_multiply(state: int, table: list[int]) -> int:
     Processes the state byte-by-byte from right to left (Horner's Method).
     """
     z = 0
-    R = 0xe1000000000000000000000000000000
-    
+
     # Process from the lowest byte (LSB) up to the highest byte (MSB)
     for i in range(16):
         # Extract the i-th byte from the right
         byte_val = (state >> (8 * i)) & 0xFF
-        
+
         # Look up the precomputed multiplication and XOR it into z
         z ^= table[byte_val]
-        
-        # For all but the final byte, shift z right by 8 bits (in the Galois field)
+
+        # For all but the final byte, shift z right by 8 bits (multiply by x^8 in the field):
+        # a plain shift, plus the reduction table's fix-up for the byte that fell off.
         if i < 15:
-            for _ in range(8):
-                if z & 1:
-                    z = (z >> 1) ^ R
-                else:
-                    z >>= 1
-                    
+            z = (z >> 8) ^ REDUCTION_TABLE[z & 0xFF]
+
     return z
 
 def run_ghash_loop(payload: bytes, shoup_table: list[int]) -> bytes:

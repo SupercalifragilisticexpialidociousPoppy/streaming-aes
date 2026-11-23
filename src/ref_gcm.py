@@ -1,64 +1,43 @@
-# ref_gcm.py
+"""
+Our own AES-GCM (SP 800-38D), built from:
+    aes_ctr.py             E_K and GCTR (AES itself comes from the `cryptography` library)
+    poly_multiplication.py GF(2^128) multiplication and Shoup's 4 KB table
+    ghash.py               H = E_K(0^128) and GHASH
+    counter.py             J0 / inc32
+    tag_gen.py             T = GHASH XOR E_K(J0)
+Correct (all 47,250 NIST vectors) but slow and not constant-time: it is a reference to prove
+we understand GCM and to cross-check the library, not the production path.
+"""
 import hmac
 
-from ghash import derive_hash_key, build_ghash_payload, run_ghash_loop
-from poly_multiplication import build_shoup_table
+from aes_ctr import gctr
 from counter import init_counters
-from aes_ctr import encrypt_plaintext, decrypt_ciphertext
+from ghash import build_ghash_payload, derive_hash_key, run_ghash_loop
+from poly_multiplication import build_shoup_table
 from tag_gen import generate_tag
 
-def reference_gcm_encrypt(key: bytes, iv: bytes, plaintext: bytes, aad: bytes, tag_len: int = 16) -> tuple[bytes, bytes]:
-    """
-    The complete Reference GCM Encryption pipeline.
-    Wires together H derivation, Shoup tables, CTR encryption, and GHASH.
-    """
-    # Stage 1: Setup and Precomputation
-    h_int = derive_hash_key(key)
-    shoup_table = build_shoup_table(h_int)
 
-    # Stage 2: Initialize Counters
-    # Pass the Shoup table (not h_int) — init_counters needs it to call run_ghash_loop
-    # for IVs that aren't exactly 96 bits, same as decrypt does.
-    y0, y1 = init_counters(iv, shoup_table)
+def _setup(key: bytes, iv: bytes):
+    shoup_table = build_shoup_table(derive_hash_key(key))   # H = E_K(0^128) -> 4 KB table
+    j0, j1 = init_counters(iv, shoup_table)
+    return shoup_table, j0, j1
 
-    # Stage 3: Encrypt Plaintext (AES-CTR)
-    ciphertext = encrypt_plaintext(key, y1, plaintext)
 
-    # Stage 4: Format GHASH Payload and Run Loop
-    ghash_payload = build_ghash_payload(aad, ciphertext)
-    raw_ghash = run_ghash_loop(ghash_payload, shoup_table)
-
-    # Stage 5: Generate Final Tag (truncated to tag_len, per NIST's MSB_t definition)
-    tag = generate_tag(key, y0, raw_ghash, tag_len=tag_len)
-
-    return ciphertext, tag
+def reference_gcm_encrypt(key: bytes, iv: bytes, plaintext: bytes, aad: bytes,
+                          tag_len: int = 16) -> tuple[bytes, bytes]:
+    shoup_table, j0, j1 = _setup(key, iv)
+    ciphertext = gctr(key, j1, plaintext)                                       # secrecy
+    raw_ghash = run_ghash_loop(build_ghash_payload(aad, ciphertext), shoup_table)  # integrity
+    return ciphertext, generate_tag(key, j0, raw_ghash, tag_len)
 
 
 def reference_gcm_decrypt(key: bytes, iv: bytes, ciphertext: bytes, tag: bytes, aad: bytes) -> bytes:
-    """
-    The complete Reference GCM Decryption pipeline.
-    Enforces verify-then-release: authenticates the ciphertext first,
-    and only decrypts if the tag is valid.
-    """
-    # Stage 1: Setup and Precomputation
-    h_int = derive_hash_key(key)
-    shoup_table = build_shoup_table(h_int)
+    """Verify-then-release: the tag is checked first; plaintext is produced only if it matches."""
+    shoup_table, j0, j1 = _setup(key, iv)
+    raw_ghash = run_ghash_loop(build_ghash_payload(aad, ciphertext), shoup_table)
+    expected_tag = generate_tag(key, j0, raw_ghash, tag_len=len(tag))
 
-    # Stage 2: Initialize Counters — same call shape as encrypt now, no adapter needed
-    y0, y1 = init_counters(iv, shoup_table)
-
-    # Stage 3: Authenticate the Ciphertext first
-    ghash_payload = build_ghash_payload(aad, ciphertext)
-    raw_ghash = run_ghash_loop(ghash_payload, shoup_table)
-
-    # Tag length is whatever the caller/vector handed us — matters for truncated tags
-    expected_tag = generate_tag(key, y0, raw_ghash, tag_len=len(tag))
-
-    # Stage 4: Constant-Time Tag Verification
-    if not hmac.compare_digest(expected_tag, tag):
+    if not hmac.compare_digest(expected_tag, tag):   # constant-time comparison
         raise ValueError("Authentication Failed: The tag is invalid or the ciphertext was tampered with.")
 
-    # Stage 5: Decrypt and Release — only runs if the tag is perfectly valid
-    plaintext = decrypt_ciphertext(key, y1, ciphertext)
-
-    return plaintext
+    return gctr(key, j1, ciphertext)
